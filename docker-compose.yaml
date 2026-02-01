@@ -49,7 +49,7 @@ services:
       - LETSENCRYPT_EMAIL=admin@log8.kr
       - VIRTUAL_PORT=5001
     env_file:
-      - .env
+      - ./env
 
   redis:
     image: redis:7-alpine
