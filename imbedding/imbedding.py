@@ -18,11 +18,16 @@ with open('menu_data.json','r',encoding='utf-8') as f:
 
 app = FastAPI(title="Menu Recommender", version="1.0.0", docs_url="/recommend/docs",
     openapi_url="/recommend/openapi.json")
-
+origins=[
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3000",
+    "https://omechu.log8.kr"
+    ]
 # CORS 설정 - 모든 도메인에서 API 호출 허용
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 프로덕션에서는 특정 도메인만 허용하는 것이 좋습니다
+    allow_origins=origins,  # 프로덕션에서는 특정 도메인만 허용하는 것이 좋습니다
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
