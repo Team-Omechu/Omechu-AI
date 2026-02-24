@@ -11,7 +11,17 @@ import hashlib
 from typing import Any, Dict
 import redis
 from dotenv import load_dotenv
+import pymysql
+
 load_dotenv()   
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "omechu_db")
+MYSQL_PORT = int(os.getenv("MYSQL_PORT", "3306"))
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "omechu1234")
+MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "omechu_db")
+
+
 
 with open('menu_data.json','r',encoding='utf-8') as f:
     menu_data=json.load(f)
@@ -108,6 +118,7 @@ class RecommendItem(BaseModel):
     menu: str
     text: str
     allergens: List[str] = []
+    image_link: Optional[str] = None
 
 class RecommendResponse(BaseModel):
     query_text: str
@@ -188,7 +199,7 @@ def deduplicate(results):
             unique.append((score, text))
     return unique
 
-ORDER_INSENSITIVE_LIST_FIELDS = {"제외음식", "알레르기"}
+ORDER_INSENSITIVE_LIST_FIELDS = {"제외음식", "알레르기","이전추천메뉴"}
 
 def normalize_for_cache(obj: Any) -> Any:
     if isinstance(obj, dict):
@@ -221,6 +232,43 @@ def make_recommend_cache_key(q_obj: Dict[str, Any], body) -> str:
 
     return f"cache:recommend:{digest}"
 
+def get_mysql_conn():
+    return pymysql.connect(
+        host=MYSQL_HOST,
+        port=MYSQL_PORT,
+        user=MYSQL_USER,
+        password=MYSQL_PASSWORD,
+        database=MYSQL_DATABASE,
+        charset="utf8mb4",
+        cursorclass=pymysql.cursors.DictCursor,
+        autocommit=True,
+    )
+
+def fetch_image_links(menu_names: List[str]) -> Dict[str, str]:
+    if not menu_names:
+        return {}
+
+    # 중복 제거
+    menu_names = list(set(menu_names))
+
+    placeholders = ",".join(["%s"] * len(menu_names))
+
+    sql = f"""
+        SELECT name, image_link
+        FROM menu
+        WHERE name IN ({placeholders})
+    """
+
+    conn = get_mysql_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, menu_names)
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+
+
+    return {row["name"]: row["image_link"] for row in rows}
 
 @app.get("/recommend")
 def root():
@@ -228,7 +276,7 @@ def root():
 
 @app.post("/recommend/menu", response_model=RecommendResponse)
 def recommend_api(body: QueryBody):
-    q_obj = {"언제": body.언제, "식사목적": body.식사목적, "날씨": body.날씨, "동반자": body.동반자, "예산": body.예산,"운동상태":body.운동상태,"선호음식":body.선호음식,"제외음식":body.제외음식}
+    q_obj = {"언제": body.언제, "식사목적": body.식사목적, "날씨": body.날씨, "동반자": body.동반자, "예산": body.예산,"운동상태":body.운동상태,"선호음식":body.선호음식,"제외음식":body.제외음식,"이전추천메뉴": body.이전추천메뉴}
     cache_key = make_recommend_cache_key(q_obj, body)
 
     # 1) 캐시 조회
@@ -248,6 +296,14 @@ def recommend_api(body: QueryBody):
     results = deduplicate(results)
     results = results[:3]
 
+    menu_names = []
+    for score, t in results:
+        sentence = t.get("text", "")
+        menu_name = extract_dish(sentence)
+        menu_names.append(menu_name)
+
+    image_map = fetch_image_links(menu_names)
+
     items = []
     for score, t in results:
         sentence = t.get("text", "")
@@ -258,8 +314,9 @@ def recommend_api(body: QueryBody):
                 menu=menu_name,
                 text=sentence,
                 allergens=t.get("allergens", []),
+                image_link=image_map.get(menu_name)  
+            )
         )
-    )
 
     response = RecommendResponse(query_text=q_text, results=items)
 
