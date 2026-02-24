@@ -63,6 +63,25 @@ services:
       - redis_data:/data
     command: ["redis-server", "--appendonly", "yes"]
 
+  omechu_db:
+    image: mysql:8.0
+    environment:
+      - MYSQL_ROOT_PASSWORD=omechu1234
+      - MYSQL_DATABASE=omechu_db
+      - MYSQL_USER=omechu1234
+      - MYSQL_PASSWORD=omechu1234
+    container_name: omechu_db
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    networks:
+      - imbedding-net
+    volumes:
+      - omechu_db_data:/var/lib/mysql
+    ports:
+      - "3306:3306"
+
 networks:
   imbedding-net:
 
@@ -72,3 +91,4 @@ volumes:
   html:
   acme:
   redis_data:
+  omechu_db_data:
