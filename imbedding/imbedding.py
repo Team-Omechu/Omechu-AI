@@ -3,8 +3,9 @@ from pydantic import BaseModel,Field
 from sentence_transformers import SentenceTransformer,util
 import torch
 import re
-from fastapi import FastAPI
+from fastapi import FastAPI , Depends, HTTPException , Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import json
 import os
 import hashlib
@@ -12,6 +13,8 @@ from typing import Any, Dict
 import redis
 from dotenv import load_dotenv
 import pymysql
+import jwt
+import requests
 
 load_dotenv()   
 
@@ -28,6 +31,7 @@ with open('menu_data.json','r',encoding='utf-8') as f:
 
 app = FastAPI(title="Menu Recommender", version="1.0.0", docs_url="/recommend/docs",
     openapi_url="/recommend/openapi.json")
+
 origins=[
     "http://localhost:3000",
     "http://localhost:3001",
@@ -65,7 +69,36 @@ else:
 REDIS_HOST = os.getenv("REDIS_HOST", "my_redis")  # 도커 네트워크면 서비스명
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 
+USER_SERVICE_BASE_URL = os.getenv("USER_SERVICE_BASE_URL", "http://user_api:3000")
+
 r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+JWT_SECRET = os.getenv("JWT_SECRET")
+JWT_ALG= "HS256"
+
+def verify_jwt_and_get_user_id(credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer())) -> str:
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+    if not JWT_SECRET:
+        raise HTTPException(status_code=500, detail="JWT_SECRET is not set")
+
+    token = credentials.credentials
+
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    # auth_api가 sub에 넣었을 수도, userId에 넣었을 수도 있어서 둘 다 대응
+    user_id = payload.get("sub") or payload.get("userId") or payload.get("id") or payload.get("payload")
+
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid token payload (no user id)")
+
+    # sub가 숫자/문자열 섞여 올 수 있어서 문자열로 통일
+    return str(user_id)
 
 def obj_to_natural_setence(q,menu="메뉴"):
     who=q.get('동반자')
@@ -275,8 +308,33 @@ def root():
     return {"status": "ok", "service": "Menu Recommender"}
 
 @app.post("/recommend/menu", response_model=RecommendResponse)
-def recommend_api(body: QueryBody):
-    q_obj = {"언제": body.언제, "식사목적": body.식사목적, "날씨": body.날씨, "동반자": body.동반자, "예산": body.예산,"운동상태":body.운동상태,"선호음식":body.선호음식,"제외음식":body.제외음식,"이전추천메뉴": body.이전추천메뉴}
+def recommend_api(body: QueryBody,request: Request, userId: str = Depends(verify_jwt_and_get_user_id)):
+    
+    auth = request.headers.get("authorization")
+    if not auth:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+    try:
+        except_resp = requests.get(
+            f"{USER_SERVICE_BASE_URL}/user/recommend/except",
+            headers={"Authorization": auth},
+            timeout=3,
+        )
+    except requests.RequestException:
+        raise HTTPException(status_code=503, detail="User service unavailable")
+
+    if except_resp.status_code >= 400:
+        raise HTTPException(status_code=except_resp.status_code, detail=except_resp.text)
+
+    # Express가 반환한 exceptedMenuIds
+    except_data = except_resp.json()
+    excepted_menus = except_data.get("success", [])
+    print("Except API response:", excepted_menus)
+
+    merged_exclude_foods = list(set((body.제외음식 or []) + excepted_menus))
+    print("Merged exclude foods:", merged_exclude_foods)
+
+    q_obj = {"언제": body.언제, "식사목적": body.식사목적, "날씨": body.날씨, "동반자": body.동반자, "예산": body.예산,"운동상태":body.운동상태,"선호음식":body.선호음식,"제외음식":merged_exclude_foods,"이전추천메뉴": body.이전추천메뉴}
     cache_key = make_recommend_cache_key(q_obj, body)
 
     # 1) 캐시 조회
@@ -290,11 +348,21 @@ def recommend_api(body: QueryBody):
         q_obj,
         20,
         exclude_allergens=body.알레르기,
-        exclude_foods=body.제외음식,
+        exclude_foods=merged_exclude_foods,
         seen_menus=body.이전추천메뉴
     )
     results = deduplicate(results)
-    results = results[:3]
+    seen_set = set(body.이전추천메뉴 or [])
+
+    filtered = []
+    for score, t in results:
+        sentence = t.get("text", "")
+        menu_name = extract_dish(sentence)
+        if menu_name in seen_set:
+            continue
+        filtered.append((score, t))
+
+    results = filtered[:3]
 
     menu_names = []
     for score, t in results:
