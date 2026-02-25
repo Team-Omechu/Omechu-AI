@@ -13,8 +13,6 @@ from typing import Any, Dict
 import redis
 from dotenv import load_dotenv
 import pymysql
-import jwt
-import requests
 
 load_dotenv()   
 
